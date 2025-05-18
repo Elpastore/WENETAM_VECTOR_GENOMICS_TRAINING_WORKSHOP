@@ -1,0 +1,102 @@
+import allel
+import numpy as np
+from scipy.spatial.distance import pdist, squareform
+import anjl
+from io import StringIO
+from Bio import Phylo
+from Bio.Phylo.Newick import Tree
+import pandas as pd
+import plotly.graph_objects as go
+from typing import Optional
+
+def compute_njt_from_vcf(vcf_path, algorithm="dynamic", metric="hamming"):
+    # Step 1: Read VCF
+    callset = allel.read_vcf(vcf_path)
+    genotypes = allel.GenotypeArray(callset['calldata/GT'])
+    samples = callset['samples']
+
+    # Step 2: Convert to alternate allele counts
+    gn = genotypes.to_n_alt(fill=-1).T  # samples x variants
+
+    # Step 3: Filter missing data
+    mask = np.all(gn != -1, axis=1)
+    gn = gn[mask]
+    sample_names = np.array(samples)[mask]
+
+    # Step 4: Compute distance matrix (as float32)
+    D = squareform(pdist(gn, metric=metric)).astype(np.float32)
+
+    # Step 5: Build NJ tree
+    if algorithm == "dynamic":
+        Z = anjl.dynamic_nj(D)
+    elif algorithm == "rapid":
+        Z = anjl.rapid_nj(D)
+    else:
+        Z = anjl.canonical_nj(D)
+
+    return Z, sample_names
+
+
+
+def plot_njt_from_vcf(
+    vcf_path: str,
+    sample_metadata: Optional[pd.DataFrame] = None,
+    color: Optional[str] = None,
+    symbol: Optional[str] = None,
+    region: str = "genome",
+    n_snps_used: Optional[int] = None,
+    center_x: float = 0,
+    center_y: float = 0,
+    arc_start: float = 0,
+    arc_stop: float = 2 * np.pi,
+    width: int = 800,
+    height: int = 600,
+    line_width: float = 0.5,
+    marker_size: float = 5,
+    show: bool = True,
+    title: str = "Neighbour-Joining Tree",
+):
+    # === Compute NJ tree from VCF ===
+    Z, sample_names = compute_njt_from_vcf(vcf_path)
+
+    # === Load or generate metadata ===
+    if sample_metadata is None:
+        df_samples = pd.DataFrame({"sample_id": sample_names})
+    else:
+        df_samples = sample_metadata.copy()
+        if "sample_id" not in df_samples.columns:
+            raise ValueError("`sample_metadata` must contain 'sample_id' column")
+        df_samples = df_samples.set_index("sample_id").loc[sample_names].reset_index()
+
+    # === Plot tree using anjl ===
+    fig = anjl.plot(
+        Z=Z,
+        leaf_data=df_samples,
+        color=color,
+        symbol=symbol,
+        hover_name="sample_id",
+        hover_data=[color, symbol] if color or symbol else None,
+        center_x=center_x,
+        center_y=center_y,
+        arc_start=arc_start,
+        arc_stop=arc_stop,
+        count_sort=True,
+        distance_sort=False,
+        line_width=line_width,
+        marker_size=marker_size,
+        width=width,
+        height=height,
+        render_mode="svg",
+    )
+
+    # Add plot title
+    fig.update_layout(
+        title=f"{title}<br>{region} ({n_snps_used if n_snps_used else 'N'} SNPs)",
+        title_font=dict(size=14),
+        template="simple_white",
+    )
+
+    if show:
+        fig.show()
+
+    return fig
